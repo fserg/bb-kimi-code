@@ -12,7 +12,8 @@ describe.sequential('negotiated native ACP steering', () => {
     { native: false, reject: false, narrow: false },
     { native: true, reject: true, narrow: false },
     { native: true, reject: false, narrow: true },
-  ])('native=$native rejection=$reject permission change=$narrow', async ({ native, reject, narrow }) => {
+    { native: true, reject: false, narrow: false, transientInstructions: true },
+  ])('native=$native rejection=$reject permission change=$narrow instructions=$transientInstructions', async ({ native, reject, narrow, transientInstructions }) => {
     const cwd = mkdtempSync(join(tmpdir(), 'kimi-native-steer-'));
     const trace = join(cwd, 'wire.ndjson');
     writeFileSync(trace, '');
@@ -35,7 +36,7 @@ describe.sequential('negotiated native ACP steering', () => {
       await request(1, 'initialize', { client: { name: 'native-steer-test', version: '1' }, protocolVersion: 2 });
       const start = await request(2, 'thread/start', { threadId: 'thr_fixture', cwd, instructionMode: 'replace', options });
       const common = { threadId: 'thr_fixture', providerThreadId: start.providerThreadId, options };
-      await request(3, 'turn/start', { ...common, clientRequestId: 'creq_aaaaaaaaaa', input: [{ type: 'text', text: 'Continue work', mentions: [] }] });
+      await request(3, 'turn/start', { ...common, options: { ...options, ...(transientInstructions ? { instructions: 'Existing session instructions' } : {}) }, clientRequestId: 'creq_aaaaaaaaaa', input: [{ type: 'text', text: 'Continue work', mentions: [] }] });
       await expect.poll(() => wire().filter(e => e.method === 'session/prompt').length).toBe(1);
       harness.sendRequest(4, 'turn/steer', { ...common, options: { ...options, ...(narrow ? { permissionMode: 'accept-edits', permissionScope: 'workspace', approvalReviewer: 'user', permissionEscalation: 'ask' } : {}) }, clientRequestId: 'creq_bbbbbbbbbb', expectedTurnId: 'fixture-turn', input: [{ type: 'text', text: 'Child progress: checks passed', mentions: [] }] });
       const response = await harness.waitForResponse(4);

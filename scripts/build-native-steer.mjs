@@ -21,7 +21,7 @@ if (source.split(anchor).length !== 2) {
   throw new Error('SDK 0.6.90 turn/steer anchor changed; review before rebuilding');
 }
 const native = `      if (session.capabilities?.meta?.["bb.nativeSteer"] === true &&
-          isDeepStrictEqual(session.nativeSteerOptions, params.options) &&
+          isDeepStrictEqual(session.nativeSteerOptions, { ...params.options, instructions: void 0 }) &&
           (session.activePromptKind === "turn" || session.activePromptKind === "agent")) {
         if (session.stopping || session.cancelRequested || session.connection.exited) {
           throw new Error("ACP session is stopping");
@@ -48,7 +48,7 @@ const native = `      if (session.capabilities?.meta?.["bb.nativeSteer"] === tru
 const optionsAnchor = '        const prompt = buildPromptContentBlocks(session, pending.input);';
 if (source.split(optionsAnchor).length !== 2) throw new Error('SDK prompt options anchor changed');
 const patched = source.replace(anchor, anchor + native).replace(optionsAnchor,
-  '        session.nativeSteerOptions = pending.options;\n' + optionsAnchor);
+  '        session.nativeSteerOptions = { ...pending.options, instructions: void 0 };\n' + optionsAnchor);
 await writeFile(new URL('../native-steer-sdk.patch', import.meta.url),
   '--- SDK 0.6.90 provider-bridge-acp-next.js\n+++ local native steering\n@@ after turn/steer session lookup @@\n' +
   native.split('\n').map(line => '+' + line).join('\n') + '\n');
