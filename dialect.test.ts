@@ -1,4 +1,13 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
+
+vi.mock('node:fs/promises', () => ({
+  readFile: async (path: string) => {
+    if (path.replaceAll('\\', '/').endsWith('/credentials/kimi-code.json')) {
+      return JSON.stringify({ access_token: 'fixture-token', refresh_token: 'fixture-refresh' });
+    }
+    throw Object.assign(new Error('Fixture file absent'), { code: 'ENOENT' });
+  },
+}));
 
 import { kimiAcpDialect } from "./src/dialect.js";
 

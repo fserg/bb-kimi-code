@@ -4,6 +4,11 @@
 
 <h1 align="center">bb-kimi-code</h1>
 
+> **Форк fserg с исправлениями автономной работы Kimi.** Установка, обе правки,
+> тесты, ограничения локального runtime и отслеживание апстрима: [FORK.md](FORK.md).
+> Инструкции и описание удалённых host ниже относятся к исходному плагину;
+> для этого форка сначала подготовьте runtime по FORK.md.
+
 <p align="center">
   Run <a href="https://github.com/MoonshotAI/kimi-code">Kimi Code CLI</a> inside
   <a href="https://github.com/get-bb/bb">bb</a> — on your machine and on remote hosts.

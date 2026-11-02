@@ -1,4 +1,4 @@
-import { experimental_acpProviderBridge as acpProviderBridge, experimental_registerAcpDialect as registerAcpDialect } from "@get-bb/plugin-sdk/provider-bridge/acp-next";
+import { experimental_acpProviderBridge as acpProviderBridge, experimental_registerAcpDialect as registerAcpDialect } from "./src/acp-native.js";
 
 import { kimiAcpDialect } from "./src/dialect.js";
 import { narrowInitializeForkOnBridge } from "./src/handshake-fork.js";

@@ -1,6 +1,6 @@
 {
   "name": "bb-plugin-kimi-code",
-  "version": "0.2.16",
+  "version": "0.2.16-fserg.1",
   "private": true,
   "type": "module",
   "description": "Run Kimi Code CLI threads from bb, locally and on enrolled hosts, through the ACP provider bridge.",
@@ -26,10 +26,19 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit",
-    "build": "bb plugin build"
+    "build": "bb plugin build",
+    "prebuild": "node scripts/build-native-steer.mjs",
+    "pretest": "node scripts/build-native-steer.mjs",
+    "pretypecheck": "node scripts/build-native-steer.mjs",
+    "runtime:prepare": "node scripts/prepare-runtime.mjs",
+    "runtime:test": "node scripts/test-runtime.mjs",
+    "upstream:check": "node scripts/check-upstream.mjs",
+    "postinstall": "node scripts/build-native-steer.mjs"
   },
   "dependencies": {
-    "@get-bb/plugin-sdk": "0.6.90"
+    "@get-bb/plugin-sdk": "0.6.90",
+    "zod": "^4.0.0",
+    "cross-spawn": "^7.0.6"
   },
   "devDependencies": {
     "@types/better-sqlite3": "^7.6.12",
@@ -39,6 +48,7 @@
     "cron-parser": "^5.5.0",
     "hono": "^4.11.9",
     "typescript": "^5.9.3",
-    "vitest": "^4.1.1"
+    "vitest": "^4.1.1",
+    "pnpm": "10.33.0"
   }
 }

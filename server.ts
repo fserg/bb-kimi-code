@@ -2,6 +2,7 @@ import type { BbPluginApi } from "@get-bb/plugin-sdk";
 
 import { generateKimiTitle } from "./src/kimi-title.js";
 import { readKimiAccountFromDisk } from "./src/kimi-account.js";
+import { forkLaunchSpec } from "./src/fork-runtime.js";
 
 export const KIMI_PLUGIN_ID = "kimi-code";
 export const KIMI_PROVIDER_ID = "kimi-code";
@@ -69,12 +70,7 @@ export default function plugin(bb: BbPluginApi) {
     },
     experimental_bridgeOptions: {
       acpDialect: "kimi",
-      acpLaunchSpec: {
-        displayName: "Kimi Code",
-        command: "kimi",
-        args: ["acp"],
-        env: {},
-      },
+      acpLaunchSpec: forkLaunchSpec(import.meta.url),
     },
   });
 

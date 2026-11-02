@@ -1,0 +1,433 @@
+diff --git a/packages/acp-server/src/server.ts b/packages/acp-server/src/server.ts
+index 2c2e1ff..0fa5947 100644
+--- a/packages/acp-server/src/server.ts
++++ b/packages/acp-server/src/server.ts
+@@ -199,6 +199,7 @@ export class AcpServer {
+     const negotiated = negotiateVersion(params.protocolVersion);
+ 
+     const agentCapabilities: AgentCapabilities = {
++      _meta: { 'bb.nativeSteer': true },
+       loadSession: true,
+       promptCapabilities: {
+         image: true,
+@@ -412,6 +413,9 @@ export class AcpServer {
+     if (!acpSession) {
+       throw RequestError.invalidParams(undefined, `Unknown sessionId: ${params.sessionId}`);
+     }
++    if (params._meta?.['bb.steer'] === true) {
++      return acpSession.steer(params.prompt);
++    }
+     if (signal === undefined) {
+       return acpSession.prompt(params.prompt);
+     }
+diff --git a/packages/acp-server/src/session.ts b/packages/acp-server/src/session.ts
+index d6e5286..fdd27ca 100644
+--- a/packages/acp-server/src/session.ts
++++ b/packages/acp-server/src/session.ts
+@@ -20,6 +20,8 @@
+  *  - no `Turn.result` promise → settlement relies solely on `turn.ended`.
+  */
+ 
++import { randomUUID } from 'node:crypto';
++
+ import type {
+   AvailableCommand,
+   ContentBlock,
+@@ -167,6 +169,7 @@ interface ResolvedCommands {
+ }
+ 
+ interface TurnDriver {
++  promptId?: string;
+   resolve(response: PromptResponse): void;
+   reject(error: unknown): void;
+   /**
+@@ -294,6 +297,28 @@ export class AcpSession {
+   async init(): Promise<void> {
+     const events = this.agent.events;
+     this.subscriptions.push(
++      events.on('turn.started', (event) => {
++        const driver = this.driver;
++        if (driver?.promptId !== undefined && driver.promptId === event.promptId) {
++          driver.turnId = event.turnId;
++          for (const early of driver.early.splice(0)) early.dispatch();
++          if (driver.cancelRequested === true) this.cancel();
++        }
++      }),
++      events.on('prompt.completed', (event) => {
++        const driver = this.driver;
++        if (driver?.promptId === event.promptId && driver.turnId === undefined) {
++          this.settleDriver(driver, () => driver.resolve({
++            stopReason: driver.cancelRequested === true ? 'cancelled' : 'end_turn',
++          }));
++        }
++      }),
++      events.on('prompt.aborted', (event) => {
++        const driver = this.driver;
++        if (driver?.promptId === event.promptId) {
++          this.settleDriver(driver, () => driver.resolve({ stopReason: 'cancelled' }));
++        }
++      }),
+       events.on('assistant.delta', (event) => {
+         this.dispatchTurnEvent(event.turnId, () => {
+           this.onAssistantDelta(event);
+@@ -508,6 +533,13 @@ export class AcpSession {
+     }
+   }
+ 
++  async steer(blocks: readonly ContentBlock[]): Promise<PromptResponse> {
++    const content = await this.preparePromptContent(blocks);
++    if (content === undefined) return { stopReason: 'cancelled' };
++    await this.agent.steer({ input: content });
++    return { stopReason: 'end_turn' };
++  }
++
+   async prompt(blocks: readonly ContentBlock[]): Promise<PromptResponse> {
+     // Slash-intent detection: builtin commands execute locally without an LLM
+     // turn; skills activate through the engine (rendered skill prompt driven
+@@ -675,7 +707,8 @@ export class AcpSession {
+    */
+   private driveTurn(input: readonly ContentPart[]): Promise<PromptResponse> {
+     this.assertNoActiveTurn();
+-    return this.driveLaunch(this.agent.prompt({ input }));
++    const promptId = randomUUID();
++    return this.driveLaunch(this.agent.prompt({ input, promptId }), promptId);
+   }
+ 
+   /**
+@@ -686,14 +719,18 @@ export class AcpSession {
+    * {@link assertNoActiveTurn}), so the prompt settles gracefully with
+    * `end_turn`.
+    */
+-  private driveLaunch(launch: Promise<PromptLaunchResult>): Promise<PromptResponse> {
++  private driveLaunch(launch: Promise<PromptLaunchResult>, promptId?: string): Promise<PromptResponse> {
+     return new Promise<PromptResponse>((resolve, reject) => {
+-      const driver: TurnDriver = { resolve, reject, settled: false, early: [] };
++      const driver: TurnDriver = { resolve, reject, settled: false, early: [], promptId };
+       this.driver = driver;
+       launch.then(
+         (launched) => {
+           if (driver.settled) return;
+           if (launched === undefined) {
++            if (promptId !== undefined && driver.cancelRequested !== true) {
++              for (const early of driver.early.splice(0)) early.dispatch();
++              return;
++            }
+             // No turn will emit `turn.ended`, so settle gracefully. The engine
+             // publishes a `prompt.completed` with reason 'blocked' for the
+             // hook-blocked case; the wire carries no blocking message to
+@@ -719,7 +756,7 @@ export class AcpSession {
+           // turn can outrun the launch round-trip — `activateSkill` returns
+           // only after the prompt-metadata update).
+           for (const early of driver.early.splice(0)) {
+-            if (early.turnId === driver.turnId) early.dispatch();
++            early.dispatch();
+           }
+         },
+         (error) => {
+@@ -737,7 +774,7 @@ export class AcpSession {
+    */
+   private dispatchTurnEvent(turnId: number, dispatch: () => void): void {
+     const driver = this.driver;
+-    if (driver !== undefined && !driver.settled && driver.turnId === undefined) {
++    if (driver !== undefined && !driver.settled && driver.turnId === undefined && driver.promptId === undefined) {
+       driver.early.push({ turnId, dispatch });
+       return;
+     }
+@@ -765,17 +802,14 @@ export class AcpSession {
+   }
+ 
+   private onAssistantDelta(event: AgentEventPayloads['assistant.delta']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     this.emit(assistantDeltaToSessionUpdate(this.sessionId, event));
+   }
+ 
+   private onThinkingDelta(event: AgentEventPayloads['thinking.delta']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     this.emit(thinkingDeltaToSessionUpdate(this.sessionId, event));
+   }
+ 
+   private onToolCallStarted(event: AgentEventPayloads['tool.call.started']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     // The klient payload mirrors `ToolCallStartedEvent` (`args` / `display`
+     // arrive as `unknown` — cast at this seam).
+     const mapped = event as unknown as ToolCallStartedEvent;
+@@ -817,7 +851,6 @@ export class AcpSession {
+   }
+ 
+   private onToolCallDelta(event: AgentEventPayloads['tool.call.delta']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     // The klient payload mirrors `ToolCallDeltaEvent` field-for-field.
+     const mapped = event as unknown as ToolCallDeltaEvent;
+     const key = acpToolCallId(event.turnId, event.toolCallId);
+@@ -839,7 +872,6 @@ export class AcpSession {
+   }
+ 
+   private onToolProgress(event: AgentEventPayloads['tool.progress']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     // The klient payload mirrors `ToolProgressEvent` field-for-field; the
+     // helper forwards only `status` updates with text (as a title refresh)
+     // and returns null for everything else, which `emit` drops.
+@@ -847,7 +879,6 @@ export class AcpSession {
+   }
+ 
+   private onToolResult(event: AgentEventPayloads['tool.result']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     const key = acpToolCallId(event.turnId, event.toolCallId);
+     const locations = this.toolLocations.get(key);
+     this.toolLocations.delete(key);
+@@ -936,7 +967,10 @@ export class AcpSession {
+ 
+   private onTurnEnded(event: AgentEventPayloads['turn.ended']): void {
+     const driver = this.driverFor(event.turnId);
+-    if (driver === undefined) return;
++    if (driver === undefined) {
++      void this.emitUsageUpdate();
++      return;
++    }
+     const error = event.error as { readonly code: string; readonly message?: string } | undefined;
+     this.settleDriver(driver, () => {
+       // Auth failures must surface as a JSON-RPC `auth_required` error
+@@ -1012,7 +1046,12 @@ export class AcpSession {
+       pending.aborted = true;
+     }
+     const driver = this.driver;
+-    if (driver === undefined || driver.settled) return;
++    if (driver === undefined || driver.settled) {
++      void this.agent.cancel().catch((error) => {
++        log.warn('acp: autonomous cancel failed', { sessionId: this.sessionId, error: String(error) });
++      });
++      return;
++    }
+     const turnId = driver.turnId;
+     if (turnId === undefined) {
+       // The launch round-trip has not returned the turn id yet. The engine's
+diff --git a/packages/acp-server/test/e2e-turn.test.ts b/packages/acp-server/test/e2e-turn.test.ts
+index bebbe42..2bd3fae 100644
+--- a/packages/acp-server/test/e2e-turn.test.ts
++++ b/packages/acp-server/test/e2e-turn.test.ts
+@@ -16,6 +16,7 @@ import { fileURLToPath } from 'node:url';
+ 
+ import { getLiveSessionById, IAgentLifecycleService, IEventBus } from '@moonshot-ai/agent-core-v2';
+ import { ToolProgress } from '@moonshot-ai/agent-core-v2/agent/toolExecutor/toolExecutorEvents';
++import { IAgentGoalService } from '@moonshot-ai/agent-core-v2/features/goal/goalService';
+ import { afterEach, describe, expect, it } from 'vitest';
+ 
+ import { mapPromptLaunchError } from '../src/session';
+@@ -243,6 +244,121 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
+     expect(history).toContain('\\"Pick many\\":\\"X, Z\\"');
+   }, 30_000);
+ 
++  it('streams autonomous turns and waits for a prompt queued behind one', async () => {
++    const c = await boot();
++    scripted!.mockNextResponse({
++      type: 'function', id: 'autonomous_wait', name: 'Bash',
++      arguments: '{"command":"echo autonomous"}',
++    });
++    scripted!.mockNextText('autonomous finished');
++    scripted!.mockNextText('queued reply');
++    let release!: (value: unknown) => void;
++    const permissionSeen = new Promise<void>((seen) => {
++      c.onRequest('session/request_permission', () => {
++        seen();
++        return new Promise((resolve) => { release = resolve; });
++      });
++    });
++    const { sessionId } = await c.send('session/new', { cwd: homeDir, mcpServers: [] }) as { sessionId: string };
++    await c.waitForSessionUpdate('available_commands_update', 10_000);
++    await c.server.klient.session(sessionId).agent('main').prompt({ input: [{ type: 'text', text: 'autonomous work' }] });
++    await permissionSeen;
++    let settled = false;
++    const queued = c.send('session/prompt', {
++      sessionId, prompt: [{ type: 'text', text: 'queued work' }],
++    }).then((result) => { settled = true; return result; });
++    await new Promise((resolve) => setTimeout(resolve, 50));
++    const prematurelySettled = settled;
++    release({ outcome: { outcome: 'selected', optionId: 'approve_once' } });
++    await queued;
++    await new Promise((resolve) => setTimeout(resolve, 100));
++    const updates = JSON.stringify(c.sessionUpdates());
++    expect(prematurelySettled).toBe(false);
++    expect(updates).toContain('autonomous finished');
++    expect(updates).toContain('queued reply');
++  }, 30_000);
++
++  it('cancels an autonomous turn with no ACP prompt driver', async () => {
++    const c = await boot();
++    scripted!.mockNextResponse({ type: 'function', id: 'autonomous_cancel', name: 'Bash', arguments: '{"command":"echo autonomous"}' });
++    const permissionSeen = new Promise<void>((seen) => {
++      c.onRequest('session/request_permission', () => { seen(); return new Promise(() => {}); });
++    });
++    const { sessionId } = await c.send('session/new', { cwd: homeDir, mcpServers: [] }) as { sessionId: string };
++    const agent = c.server.klient.session(sessionId).agent('main');
++    const ended = new Promise<string>((resolve) => {
++      agent.events.on('turn.ended', event => resolve(event.reason));
++    });
++    await agent.prompt({ input: [{ type: 'text', text: 'autonomous work' }] });
++    await permissionSeen;
++    c.notify('session/cancel', { sessionId });
++    expect(await ended).toBe('cancelled');
++  }, 30_000);
++
++  it('steers a progress message without cancelling the turn or pausing its goal', async () => {
++    const c = await boot();
++    scripted!.mockNextResponse({ type: 'function', id: 'wait_for_progress', name: 'Bash', arguments: '{"command":"echo ready"}' });
++    scripted!.mockNextText('progress incorporated');
++    scripted!.mockNextResponse({ type: 'function', id: 'finish_goal', name: 'UpdateGoal', arguments: '{"status":"complete"}' });
++    scripted!.mockNextText('next stage completed automatically');
++    let release!: (value: unknown) => void;
++    const permissionSeen = new Promise<void>((seen) => {
++      c.onRequest('session/request_permission', () => {
++        seen();
++        return new Promise((resolve) => { release = resolve; });
++      });
++    });
++    const { sessionId } = await c.send('session/new', { cwd: homeDir, mcpServers: [] }) as { sessionId: string };
++    const session = getLiveSessionById(c.server.core.accessor, sessionId)!;
++    const goals = session.accessor.get(IAgentLifecycleService).handleOf('main')!.accessor.get(IAgentGoalService);
++    await goals.createGoal({ objective: 'Incorporate child progress' });
++    const prompt = c.send('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'Begin work' }] });
++    await permissionSeen;
++    try {
++      expect(await c.send('session/prompt', { sessionId, _meta: { 'bb.steer': true }, prompt: [{ type: 'text', text: '[bb system] Child completed checks.' }] })).toEqual({ stopReason: 'end_turn' });
++      expect(goals.getGoal().goal?.status).toBe('active');
++      release({ outcome: { outcome: 'selected', optionId: 'approve_once' } });
++      expect(await prompt).toEqual({ stopReason: 'end_turn' });
++      await expect.poll(() => JSON.stringify(c.received), { timeout: 10_000 }).toContain('next stage completed automatically');
++      expect(goals.getGoal().goal).toBeNull();
++      expect(JSON.stringify(scripted!.callHistory())).toContain('Child completed checks.');
++    } finally {
++      await goals.pauseGoal().catch(() => undefined);
++      release({ outcome: { outcome: 'cancelled' } });
++      c.notify('session/cancel', { sessionId });
++      await prompt;
++    }
++  }, 30_000);
++
++  it('keeps an explicitly paused goal paused when receiving progress', async () => {
++    const c = await boot();
++    const { sessionId } = await c.send('session/new', { cwd: homeDir, mcpServers: [] }) as { sessionId: string };
++    const session = getLiveSessionById(c.server.core.accessor, sessionId)!;
++    const goals = session.accessor.get(IAgentLifecycleService).handleOf('main')!.accessor.get(IAgentGoalService);
++    await goals.createGoal({ objective: 'Remain paused' });
++    await goals.pauseGoal({ reason: 'User requested pause' });
++    scripted!.mockNextText('Progress received');
++    expect(await c.send('session/prompt', { sessionId, _meta: { 'bb.steer': true }, prompt: [{ type: 'text', text: 'Child progress' }] })).toEqual({ stopReason: 'end_turn' });
++    expect(goals.getGoal().goal?.status).toBe('paused');
++  }, 30_000);
++
++  it('still pauses an active goal on an explicit ACP cancel', async () => {
++    const c = await boot();
++    scripted!.mockNextResponse({ type: 'function', id: 'wait_for_stop', name: 'Bash', arguments: '{"command":"echo ready"}' });
++    const permissionSeen = new Promise<void>((seen) => {
++      c.onRequest('session/request_permission', () => { seen(); return new Promise(() => {}); });
++    });
++    const { sessionId } = await c.send('session/new', { cwd: homeDir, mcpServers: [] }) as { sessionId: string };
++    const session = getLiveSessionById(c.server.core.accessor, sessionId)!;
++    const goals = session.accessor.get(IAgentLifecycleService).handleOf('main')!.accessor.get(IAgentGoalService);
++    await goals.createGoal({ objective: 'Stop when instructed' });
++    const prompt = c.send('session/prompt', { sessionId, prompt: [{ type: 'text', text: 'Begin work' }] });
++    await permissionSeen;
++    c.notify('session/cancel', { sessionId });
++    expect(await prompt).toEqual({ stopReason: 'cancelled' });
++    await expect.poll(() => goals.getGoal().goal?.status).toBe('paused');
++  }, 30_000);
++
+   it('rejects a second prompt while a turn is in flight', async () => {
+     const c = await boot();
+     // First model response parks the turn at a Bash approval; the follow-up
+@@ -377,14 +493,14 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
+     const upgrade = updates.find(
+       (u) => u?.sessionUpdate === 'tool_call_update' && u?.locations !== undefined,
+     );
+-    expect(upgrade?.locations?.[0]?.path).toBe(filePath);
++    expect(upgrade?.locations?.[0]?.path?.replaceAll('\\', '/')).toBe(filePath.replaceAll('\\', '/'));
+ 
+     // …and the terminal tool_call_update re-attaches the same locations
+     // (`tool.result` itself carries no args/display).
+     const terminal = updates.find(
+       (u) => u?.sessionUpdate === 'tool_call_update' && u?.status === 'completed',
+     );
+-    expect(terminal?.locations?.[0]?.path).toBe(filePath);
++    expect(terminal?.locations?.[0]?.path?.replaceAll('\\', '/')).toBe(filePath.replaceAll('\\', '/'));
+   }, 30_000);
+ 
+   it('settles as cancelled without launching a turn when cancel arrives during image compression', async () => {
+diff --git a/packages/acp-server/test/lifecycle.test.ts b/packages/acp-server/test/lifecycle.test.ts
+index 547d998..163c82f 100644
+--- a/packages/acp-server/test/lifecycle.test.ts
++++ b/packages/acp-server/test/lifecycle.test.ts
+@@ -401,7 +401,7 @@ describe('acp-server session lifecycle', () => {
+       try {
+         const dirs = lease.instance.program.dirs;
+         await dirs.ready;
+-        expect(dirs.additionalDirs).toContain(extraDir);
++        expect(dirs.additionalDirs.map(dir => dir.replaceAll('\\', '/'))).toContain(extraDir.replaceAll('\\', '/'));
+       } finally {
+         lease.dispose();
+       }
+diff --git a/packages/agent-core-v2/src/features/goal/goalService.ts b/packages/agent-core-v2/src/features/goal/goalService.ts
+index 01a8f63..0581c34 100644
+--- a/packages/agent-core-v2/src/features/goal/goalService.ts
++++ b/packages/agent-core-v2/src/features/goal/goalService.ts
+@@ -41,6 +41,7 @@ import { IConfigService } from '#/app/config/config';
+ import { IEventBus } from '#/app/event/eventBus';
+ import { registerEvent2Class } from '#/app/event/event2';
+ import { IFlagService } from '#/app/flag/flag';
++import { registerFlagDefinition } from '#/app/flag/flagRegistry';
+ import type { GoalBudgetProperties } from '#/app/telemetry/events';
+ import { ITelemetryService } from '#/app/telemetry/telemetry';
+ import {
+@@ -787,6 +788,15 @@ function cancelPendingContinuation(context: GoalOperationContext,
+   }
+ }
+ 
++registerFlagDefinition({
++  id: 'goal_preserve_active_on_resume',
++  title: 'Preserve active goals on resume',
++  description: 'Keep persisted active goals active when restoring an agent session.',
++  env: 'KIMI_CODE_EXPERIMENTAL_GOAL_PRESERVE_ACTIVE_ON_RESUME',
++  default: false,
++  surface: 'core',
++});
++
+ function normalizeAfterReplay(context: GoalOperationContext): void {
+   appendForkClearedReminder(context);
+   context.runtime.send({ type: 'goal.deadline.clear' });
+@@ -799,6 +809,11 @@ function normalizeAfterReplay(context: GoalOperationContext): void {
+   }
+   if (state.status !== 'active') return;
+ 
++  if (context.runtime.get(IFlagService).enabled('goal_preserve_active_on_resume')) {
++    applyLifecycle(context, state, 'active', undefined, 'runtime');
++    return;
++  }
++
+   const reason = 'Paused after agent resume';
+   void context.runtime.dispatch(
+     new GoalUpdate({
+diff --git a/packages/agent-core-v2/test/features/goal/goal.test.ts b/packages/agent-core-v2/test/features/goal/goal.test.ts
+index 76d7507..67ba3b6 100644
+--- a/packages/agent-core-v2/test/features/goal/goal.test.ts
++++ b/packages/agent-core-v2/test/features/goal/goal.test.ts
+@@ -696,6 +696,21 @@ describe('AgentGoalService', () => {
+       expect(goals.getGoal().goal?.budget.turnBudget).toBe(2);
+     });
+ 
++    it.each(['active', 'paused', 'blocked'] as const)('preserves a replayed %s goal when automatic restoration is enabled', async (status) => {
++      await ctx.dispose();
++      ctx = createUnrestoredTestAgent(
++        appService(IFlagService, stubFlag((id) => id === 'goal_preserve_active_on_resume')),
++        appService(IGoalDeadlineScheduler, new ManualGoalDeadlineScheduler()),
++      );
++      goals = ctx.get(IAgentGoalService);
++      await restoreGoalRecords(ctx, goals, [
++        { type: 'goal.create', goalId: 'restore-goal', objective: 'Continue authorized work' },
++        { type: 'goal.update', status, reason: status === 'active' ? undefined : 'User decision', tokensUsed: 12, turnsUsed: 2, wallClockMs: 100 },
++      ]);
++      expect(goals.getGoal().goal).toMatchObject({ status, tokensUsed: 12, turnsUsed: 2, wallClockMs: 100 });
++      if (status !== 'active') expect(goals.getGoal().goal?.terminalReason).toBe('User decision');
++    });
++
+     it('normalizes active replayed goals to paused', async () => {
+       await ctx.dispose();
+       const persistence = new InMemoryWireRecordPersistence();

@@ -1,0 +1,24 @@
+name: Verify maintained Kimi runtime
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  regression:
+    runs-on: windows-latest
+    timeout-minutes: 25
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '24.15.0'
+          cache: npm
+      - run: npm ci --ignore-scripts
+      - run: node scripts/build-native-steer.mjs
+      - run: npm run runtime:prepare
+      - run: npm test
+      - run: npm run typecheck
+      - run: npm run runtime:test
+      - run: npm run build

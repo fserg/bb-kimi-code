@@ -1,0 +1,30 @@
+--- a/packages/acp-server/test/e2e-turn.test.ts
++++ b/packages/acp-server/test/e2e-turn.test.ts
+@@ -493,14 +493,14 @@
+     const upgrade = updates.find(
+       (u) => u?.sessionUpdate === 'tool_call_update' && u?.locations !== undefined,
+     );
+-    expect(upgrade?.locations?.[0]?.path).toBe(filePath);
++    expect(upgrade?.locations?.[0]?.path?.replaceAll('\\', '/')).toBe(filePath.replaceAll('\\', '/'));
+ 
+     // …and the terminal tool_call_update re-attaches the same locations
+     // (`tool.result` itself carries no args/display).
+     const terminal = updates.find(
+       (u) => u?.sessionUpdate === 'tool_call_update' && u?.status === 'completed',
+     );
+-    expect(terminal?.locations?.[0]?.path).toBe(filePath);
++    expect(terminal?.locations?.[0]?.path?.replaceAll('\\', '/')).toBe(filePath.replaceAll('\\', '/'));
+   }, 30_000);
+ 
+   it('settles as cancelled without launching a turn when cancel arrives during image compression', async () => {
+--- a/packages/acp-server/test/lifecycle.test.ts
++++ b/packages/acp-server/test/lifecycle.test.ts
+@@ -401,7 +401,7 @@
+       try {
+         const dirs = lease.instance.program.dirs;
+         await dirs.ready;
+-        expect(dirs.additionalDirs).toContain(extraDir);
++        expect(dirs.additionalDirs.map(dir => dir.replaceAll('\\', '/'))).toContain(extraDir.replaceAll('\\', '/'));
+       } finally {
+         lease.dispose();
+       }

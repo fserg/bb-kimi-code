@@ -1,0 +1,8 @@
+{
+  "repository": "https://github.com/MoonshotAI/kimi-code.git",
+  "commit": "a2afdbc7d1fa0737d45d5780cc6c2bd38e477b55",
+  "version": "2.4.1",
+  "sdk": "0.6.90",
+  "sdkSha256": "977fd7cd16ee4fe81dfce117ce68777b46c334f6e9823e28f57abe0d1be686b0",
+  "pluginBase": "a2ca9422343ba672f401b59102f1446397609f43"
+}

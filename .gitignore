@@ -1,2 +1,5 @@
 node_modules/
 dist/
+.runtime/
+src/acp-native.js
+native-steer-sdk.patch

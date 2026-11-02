@@ -1,0 +1,229 @@
+diff --git a/packages/acp-server/src/session.ts b/packages/acp-server/src/session.ts
+index d6e5286..499748c 100644
+--- a/packages/acp-server/src/session.ts
++++ b/packages/acp-server/src/session.ts
+@@ -20,6 +20,8 @@
+  *  - no `Turn.result` promise → settlement relies solely on `turn.ended`.
+  */
+ 
++import { randomUUID } from 'node:crypto';
++
+ import type {
+   AvailableCommand,
+   ContentBlock,
+@@ -167,6 +169,7 @@ interface ResolvedCommands {
+ }
+ 
+ interface TurnDriver {
++  promptId?: string;
+   resolve(response: PromptResponse): void;
+   reject(error: unknown): void;
+   /**
+@@ -294,6 +297,28 @@ export class AcpSession {
+   async init(): Promise<void> {
+     const events = this.agent.events;
+     this.subscriptions.push(
++      events.on('turn.started', (event) => {
++        const driver = this.driver;
++        if (driver?.promptId !== undefined && driver.promptId === event.promptId) {
++          driver.turnId = event.turnId;
++          for (const early of driver.early.splice(0)) early.dispatch();
++          if (driver.cancelRequested === true) this.cancel();
++        }
++      }),
++      events.on('prompt.completed', (event) => {
++        const driver = this.driver;
++        if (driver?.promptId === event.promptId && driver.turnId === undefined) {
++          this.settleDriver(driver, () => driver.resolve({
++            stopReason: driver.cancelRequested === true ? 'cancelled' : 'end_turn',
++          }));
++        }
++      }),
++      events.on('prompt.aborted', (event) => {
++        const driver = this.driver;
++        if (driver?.promptId === event.promptId) {
++          this.settleDriver(driver, () => driver.resolve({ stopReason: 'cancelled' }));
++        }
++      }),
+       events.on('assistant.delta', (event) => {
+         this.dispatchTurnEvent(event.turnId, () => {
+           this.onAssistantDelta(event);
+@@ -675,7 +700,8 @@ export class AcpSession {
+    */
+   private driveTurn(input: readonly ContentPart[]): Promise<PromptResponse> {
+     this.assertNoActiveTurn();
+-    return this.driveLaunch(this.agent.prompt({ input }));
++    const promptId = randomUUID();
++    return this.driveLaunch(this.agent.prompt({ input, promptId }), promptId);
+   }
+ 
+   /**
+@@ -686,14 +712,18 @@ export class AcpSession {
+    * {@link assertNoActiveTurn}), so the prompt settles gracefully with
+    * `end_turn`.
+    */
+-  private driveLaunch(launch: Promise<PromptLaunchResult>): Promise<PromptResponse> {
++  private driveLaunch(launch: Promise<PromptLaunchResult>, promptId?: string): Promise<PromptResponse> {
+     return new Promise<PromptResponse>((resolve, reject) => {
+-      const driver: TurnDriver = { resolve, reject, settled: false, early: [] };
++      const driver: TurnDriver = { resolve, reject, settled: false, early: [], promptId };
+       this.driver = driver;
+       launch.then(
+         (launched) => {
+           if (driver.settled) return;
+           if (launched === undefined) {
++            if (promptId !== undefined && driver.cancelRequested !== true) {
++              for (const early of driver.early.splice(0)) early.dispatch();
++              return;
++            }
+             // No turn will emit `turn.ended`, so settle gracefully. The engine
+             // publishes a `prompt.completed` with reason 'blocked' for the
+             // hook-blocked case; the wire carries no blocking message to
+@@ -719,7 +749,7 @@ export class AcpSession {
+           // turn can outrun the launch round-trip — `activateSkill` returns
+           // only after the prompt-metadata update).
+           for (const early of driver.early.splice(0)) {
+-            if (early.turnId === driver.turnId) early.dispatch();
++            early.dispatch();
+           }
+         },
+         (error) => {
+@@ -737,7 +767,7 @@ export class AcpSession {
+    */
+   private dispatchTurnEvent(turnId: number, dispatch: () => void): void {
+     const driver = this.driver;
+-    if (driver !== undefined && !driver.settled && driver.turnId === undefined) {
++    if (driver !== undefined && !driver.settled && driver.turnId === undefined && driver.promptId === undefined) {
+       driver.early.push({ turnId, dispatch });
+       return;
+     }
+@@ -765,17 +795,14 @@ export class AcpSession {
+   }
+ 
+   private onAssistantDelta(event: AgentEventPayloads['assistant.delta']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     this.emit(assistantDeltaToSessionUpdate(this.sessionId, event));
+   }
+ 
+   private onThinkingDelta(event: AgentEventPayloads['thinking.delta']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     this.emit(thinkingDeltaToSessionUpdate(this.sessionId, event));
+   }
+ 
+   private onToolCallStarted(event: AgentEventPayloads['tool.call.started']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     // The klient payload mirrors `ToolCallStartedEvent` (`args` / `display`
+     // arrive as `unknown` — cast at this seam).
+     const mapped = event as unknown as ToolCallStartedEvent;
+@@ -817,7 +844,6 @@ export class AcpSession {
+   }
+ 
+   private onToolCallDelta(event: AgentEventPayloads['tool.call.delta']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     // The klient payload mirrors `ToolCallDeltaEvent` field-for-field.
+     const mapped = event as unknown as ToolCallDeltaEvent;
+     const key = acpToolCallId(event.turnId, event.toolCallId);
+@@ -839,7 +865,6 @@ export class AcpSession {
+   }
+ 
+   private onToolProgress(event: AgentEventPayloads['tool.progress']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     // The klient payload mirrors `ToolProgressEvent` field-for-field; the
+     // helper forwards only `status` updates with text (as a title refresh)
+     // and returns null for everything else, which `emit` drops.
+@@ -847,7 +872,6 @@ export class AcpSession {
+   }
+ 
+   private onToolResult(event: AgentEventPayloads['tool.result']): void {
+-    if (this.driverFor(event.turnId) === undefined) return;
+     const key = acpToolCallId(event.turnId, event.toolCallId);
+     const locations = this.toolLocations.get(key);
+     this.toolLocations.delete(key);
+@@ -936,7 +960,10 @@ export class AcpSession {
+ 
+   private onTurnEnded(event: AgentEventPayloads['turn.ended']): void {
+     const driver = this.driverFor(event.turnId);
+-    if (driver === undefined) return;
++    if (driver === undefined) {
++      void this.emitUsageUpdate();
++      return;
++    }
+     const error = event.error as { readonly code: string; readonly message?: string } | undefined;
+     this.settleDriver(driver, () => {
+       // Auth failures must surface as a JSON-RPC `auth_required` error
+@@ -1012,7 +1039,12 @@ export class AcpSession {
+       pending.aborted = true;
+     }
+     const driver = this.driver;
+-    if (driver === undefined || driver.settled) return;
++    if (driver === undefined || driver.settled) {
++      void this.agent.cancel().catch((error) => {
++        log.warn('acp: autonomous cancel failed', { sessionId: this.sessionId, error: String(error) });
++      });
++      return;
++    }
+     const turnId = driver.turnId;
+     if (turnId === undefined) {
+       // The launch round-trip has not returned the turn id yet. The engine's
+diff --git a/packages/acp-server/test/e2e-turn.test.ts b/packages/acp-server/test/e2e-turn.test.ts
+index bebbe42..f866321 100644
+--- a/packages/acp-server/test/e2e-turn.test.ts
++++ b/packages/acp-server/test/e2e-turn.test.ts
+@@ -243,6 +243,57 @@ describe('acp-server real prompt turn (scripted LLM)', () => {
+     expect(history).toContain('\\"Pick many\\":\\"X, Z\\"');
+   }, 30_000);
+ 
++  it('streams autonomous turns and waits for a prompt queued behind one', async () => {
++    const c = await boot();
++    scripted!.mockNextResponse({
++      type: 'function', id: 'autonomous_wait', name: 'Bash',
++      arguments: '{"command":"echo autonomous"}',
++    });
++    scripted!.mockNextText('autonomous finished');
++    scripted!.mockNextText('queued reply');
++    let release!: (value: unknown) => void;
++    const permissionSeen = new Promise<void>((seen) => {
++      c.onRequest('session/request_permission', () => {
++        seen();
++        return new Promise((resolve) => { release = resolve; });
++      });
++    });
++    const { sessionId } = await c.send('session/new', { cwd: homeDir, mcpServers: [] }) as { sessionId: string };
++    await c.waitForSessionUpdate('available_commands_update', 10_000);
++    await c.server.klient.session(sessionId).agent('main').prompt({ input: [{ type: 'text', text: 'autonomous work' }] });
++    await permissionSeen;
++    let settled = false;
++    const queued = c.send('session/prompt', {
++      sessionId, prompt: [{ type: 'text', text: 'queued work' }],
++    }).then((result) => { settled = true; return result; });
++    await new Promise((resolve) => setTimeout(resolve, 50));
++    const prematurelySettled = settled;
++    release({ outcome: { outcome: 'selected', optionId: 'approve_once' } });
++    await queued;
++    await new Promise((resolve) => setTimeout(resolve, 100));
++    const updates = JSON.stringify(c.sessionUpdates());
++    expect(prematurelySettled).toBe(false);
++    expect(updates).toContain('autonomous finished');
++    expect(updates).toContain('queued reply');
++  }, 30_000);
++
++  it('cancels an autonomous turn with no ACP prompt driver', async () => {
++    const c = await boot();
++    scripted!.mockNextResponse({ type: 'function', id: 'autonomous_cancel', name: 'Bash', arguments: '{"command":"echo autonomous"}' });
++    const permissionSeen = new Promise<void>((seen) => {
++      c.onRequest('session/request_permission', () => { seen(); return new Promise(() => {}); });
++    });
++    const { sessionId } = await c.send('session/new', { cwd: homeDir, mcpServers: [] }) as { sessionId: string };
++    const agent = c.server.klient.session(sessionId).agent('main');
++    const ended = new Promise<string>((resolve) => {
++      agent.events.on('turn.ended', event => resolve(event.reason));
++    });
++    await agent.prompt({ input: [{ type: 'text', text: 'autonomous work' }] });
++    await permissionSeen;
++    c.notify('session/cancel', { sessionId });
++    expect(await ended).toBe('cancelled');
++  }, 30_000);
++
+   it('rejects a second prompt while a turn is in flight', async () => {
+     const c = await boot();
+     // First model response parks the turn at a Bash approval; the follow-up

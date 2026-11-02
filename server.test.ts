@@ -116,7 +116,7 @@ describe("the kimi-code provider declaration", () => {
 });
 
 describe("the kimi-code bridge options", () => {
-  it("launches `kimi acp` through a spec the published schema accepts", () => {
+  it("launches the maintained ACP runtime through the published schema", () => {
     const options = registeredDeclaration().experimental_bridgeOptions as {
       acpLaunchSpec?: unknown;
       acpDialect?: unknown;
@@ -124,9 +124,9 @@ describe("the kimi-code bridge options", () => {
     expect(options.acpDialect).toBe("kimi");
     expect(acpLaunchSpecSchema.parse(options.acpLaunchSpec)).toEqual({
       displayName: "Kimi Code",
-      command: "kimi",
-      args: ["acp"],
-      env: {},
+      command: "node",
+      args: [expect.stringMatching(/scripts[\\/]launch-kimi\.mjs$/), "acp"],
+      env: { KIMI_CODE_EXPERIMENTAL_GOAL_PRESERVE_ACTIVE_ON_RESUME: "1" },
     });
   });
 });
